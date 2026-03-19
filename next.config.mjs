@@ -2,7 +2,7 @@
 const nextConfig = {
   reactStrictMode: true,
   typescript: {
-    ignoreBuildErrors: true,   // ← isso faz o build passar agora (depois a gente limpa)
+    ignoreBuildErrors: true,
   },
 };
 
