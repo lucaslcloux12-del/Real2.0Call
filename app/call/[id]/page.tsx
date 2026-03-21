@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { auth, db, realtimeDB } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
-import { doc, onSnapshot } from "firebase/firestore";
 import { ref, onValue, set } from "firebase/database";
 import { Mic, MicOff, Video, VideoOff, Monitor, MessageCircle, Copy, LogOut } from "lucide-react";
 
@@ -12,7 +11,6 @@ export default function CallRoom() {
   const [user, setUser] = useState<any>(null);
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
-  const [isSpeaking, setIsSpeaking] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [messages, setMessages] = useState<any[]>([]);
   const [newMessage, setNewMessage] = useState("");
@@ -23,13 +21,15 @@ export default function CallRoom() {
   const peerConnection = useRef<RTCPeerConnection | null>(null);
   const router = useRouter();
 
+  // Login + stream inicial
   useEffect(() => {
     onAuthStateChanged(auth, (u) => { if (!u) router.push("/"); setUser(u); });
 
-    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
-      localStream.current = stream;
-      if (localVideo.current) localVideo.current.srcObject = stream;
-    });
+    navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: true })
+      .then(stream => {
+        localStream.current = stream;
+        if (localVideo.current) localVideo.current.srcObject = stream;
+      });
   }, [router]);
 
   // WebRTC + renegociação pra tela
@@ -67,18 +67,19 @@ export default function CallRoom() {
 
   }, [id, user]);
 
-  const shareScreen = async () => {
-    const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-    const screenTrack = screenStream.getVideoTracks()[0];
-
-    const sender = peerConnection.current?.getSenders().find(s => s.track?.kind === "video");
-    if (sender) sender.replaceTrack(screenTrack);
-
-    // Renegociação automática (isso faz a tela aparecer pro outro)
-    peerConnection.current?.createOffer().then(offer => {
-      peerConnection.current?.setLocalDescription(offer);
-      set(ref(realtimeDB, `rooms/${id}/signaling/offer`), offer);
-    });
+  // FIX DA CÂMERA (não fica escura nunca mais)
+  const toggleCam = async () => {
+    if (camOn) {
+      const track = localStream.current?.getVideoTracks()[0];
+      if (track) track.enabled = false;
+    } else {
+      const newStream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+      const newTrack = newStream.getVideoTracks()[0];
+      const sender = peerConnection.current?.getSenders().find(s => s.track?.kind === "video");
+      if (sender) sender.replaceTrack(newTrack);
+      if (localVideo.current) localVideo.current.srcObject = newStream; // força atualização
+    }
+    setCamOn(!camOn);
   };
 
   const toggleMic = () => {
@@ -87,56 +88,70 @@ export default function CallRoom() {
     setMicOn(!micOn);
   };
 
-  const toggleCam = () => {
-    const track = localStream.current?.getVideoTracks()[0];
-    if (track) track.enabled = !track.enabled;
-    setCamOn(!camOn);
+  const shareScreen = async () => {
+    const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    const sender = peerConnection.current?.getSenders().find(s => s.track?.kind === "video");
+    if (sender) sender.replaceTrack(screenStream.getVideoTracks()[0]);
+
+    // Renegociação pra tela aparecer pro outro
+    peerConnection.current?.createOffer().then(offer => {
+      peerConnection.current?.setLocalDescription(offer);
+      set(ref(realtimeDB, `rooms/${id}/signaling/offer`), offer);
+    });
   };
 
-  const sendMessage = async () => {
+  const sendMessage = () => {
     if (!newMessage.trim()) return;
-    // (chat via Firestore - adicione collection se quiser persistente)
-    setMessages([...messages, { text: newMessage, user: user.email }]);
+    setMessages([...messages, { text: newMessage, user: user?.email }]);
     setNewMessage("");
   };
 
-  const copyLink = () => {
-    navigator.clipboard.writeText(window.location.href);
-    alert("✅ Link copiado! Compartilhe com quem quiser entrar.");
-  };
+  const sair = () => router.push("/");
 
   return (
     <div className="h-screen bg-gradient-to-br from-zinc-950 to-black flex flex-col">
-      <header className="p-5 bg-zinc-900/90 flex justify-between">
+      <header className="p-5 bg-zinc-900/90 flex justify-between items-center">
         <h1 className="text-4xl font-black text-blue-400">2.0 CALL • {id}</h1>
-        <button onClick={copyLink} className="bg-zinc-800 px-6 py-3 rounded-2xl flex gap-2"><Copy size={24} /> Copiar</button>
+        <button onClick={() => { navigator.clipboard.writeText(window.location.href); alert("Link copiado!"); }} className="bg-zinc-800 px-6 py-3 rounded-2xl flex gap-2"><Copy size={24} /> Copiar</button>
       </header>
 
       <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-8 p-8">
         <div className="relative rounded-3xl overflow-hidden bg-black border border-blue-500">
-          {camOn ? <video ref={localVideo} autoPlay muted className="w-full h-full object-cover" /> : <div className="flex items-center justify-center h-full"><img src={user?.photoURL} className="w-52 h-52 rounded-full border-4 border-blue-500" /></div>}
-          <div className="absolute bottom-6 left-6 bg-black/70 px-6 py-3 rounded-2xl flex gap-3">
-            Você {!micOn && <MicOff className="text-red-500" />} {isSpeaking && <div className="w-5 h-5 bg-green-400 rounded-full animate-ping" />}
+          {camOn ? (
+            <video ref={localVideo} autoPlay muted playsInline className="w-full h-full object-cover" />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center bg-zinc-950">
+              <img src={user?.photoURL} className="w-52 h-52 rounded-full border-4 border-blue-500" />
+            </div>
+          )}
+          <div className="absolute bottom-6 left-6 bg-black/70 px-6 py-3 rounded-2xl flex items-center gap-3">
+            Você {!micOn && <MicOff className="text-red-500" />}
           </div>
         </div>
 
         <div className="relative rounded-3xl overflow-hidden bg-black border border-zinc-700">
-          <video ref={remoteVideo} autoPlay className="w-full h-full object-cover" />
+          <video ref={remoteVideo} autoPlay playsInline className="w-full h-full object-cover" />
         </div>
       </div>
 
-      {/* Controles + Chat */}
+      {/* Barra de controles com Sair + Chat */}
       <div className="bg-zinc-900/95 p-6 flex justify-center gap-8">
         <button onClick={toggleMic} className="p-6 bg-zinc-800 rounded-3xl">{micOn ? <Mic size={36} /> : <MicOff size={36} className="text-red-500" />}</button>
         <button onClick={toggleCam} className="p-6 bg-zinc-800 rounded-3xl">{camOn ? <Video size={36} /> : <VideoOff size={36} className="text-red-500" />}</button>
         <button onClick={shareScreen} className="p-6 bg-blue-600 rounded-3xl"><Monitor size={36} /></button>
         <button onClick={() => setShowChat(!showChat)} className="p-6 bg-zinc-800 rounded-3xl"><MessageCircle size={36} /></button>
+        <button onClick={sair} className="p-6 bg-red-600 rounded-3xl"><LogOut size={36} /></button>
       </div>
 
+      {/* Chat lateral */}
       {showChat && (
         <div className="absolute right-0 top-16 bottom-0 w-96 bg-zinc-900/95 border-l border-blue-500 p-6 flex flex-col">
           <div className="flex-1 overflow-y-auto mb-4 space-y-3">
-            {messages.map((m, i) => <div key={i} className="bg-zinc-800 p-4 rounded-2xl"><span className="text-blue-400">{m.user}</span>: {m.text}</div>)}
+            {messages.map((m, i) => (
+              <div key={i} className="bg-zinc-800 p-4 rounded-2xl">
+                <span className="text-blue-400 text-sm">{m.user}</span>: {m.text}
+              </div>
+            ))}
           </div>
           <div className="flex gap-3">
             <input value={newMessage} onChange={e => setNewMessage(e.target.value)} onKeyDown={e => e.key === "Enter" && sendMessage()} className="flex-1 bg-zinc-800 p-5 rounded-3xl" placeholder="Digite uma mensagem..." />
