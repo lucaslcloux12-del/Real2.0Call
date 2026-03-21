@@ -20,30 +20,41 @@ export default function Home() {
   const loginGoogle = () => signInWithPopup(auth, googleProvider);
 
   const criarChamada = async () => {
-    if (!user) return;
-
-    const docRef = doc(db, "approved_creators", user.email!);
-    const aprovado = await getDoc(docRef);
-
-    if (user.email !== "lucaslcloux12@gmail.com" && !aprovado.exists()) {
-      setShowModal(true);
+    console.log("✅ Botão Nova Chamada clicado!");
+    if (!user) {
+      alert("Faça login primeiro!");
       return;
     }
 
-    const roomId = uuidv4();
-    await setDoc(doc(db, "rooms", roomId), {
-      creator: user.email,
-      admins: [user.email],
-      participants: [],
-      createdAt: new Date().toISOString(),
-    });
+    try {
+      const docRef = doc(db, "approved_creators", user.email!);
+      const aprovado = await getDoc(docRef);
 
-    router.push(`/call/${roomId}`);
+      if (user.email !== "lucaslcloux12@gmail.com" && !aprovado.exists()) {
+        setShowModal(true);
+        return;
+      }
+
+      const roomId = uuidv4();
+      await setDoc(doc(db, "rooms", roomId), {
+        creator: user.email,
+        admins: [user.email],
+        participants: [],
+        createdAt: new Date().toISOString(),
+      });
+
+      console.log("✅ Sala criada:", roomId);
+      alert(`✅ Chamada criada! Sala: ${roomId}`);
+      router.push(`/call/${roomId}`);
+    } catch (error: any) {
+      console.error("❌ Erro ao criar chamada:", error);
+      alert("Erro: " + error.message + "\n\nVerifique o console (F12)");
+    }
   };
 
   const autorizar = () => {
     if (senha === "753951") {
-      alert("✅ Senha OK! Agora vá no Firebase Console → Firestore → crie a coleção 'approved_creators' e adicione o documento com o ID sendo o email da conta que você quer liberar. (Depois posso te ajudar a fazer email automático com Cloud Function)");
+      alert("✅ Senha OK! Agora você pode criar chamadas (ou adicione o email na coleção approved_creators no Firebase).");
       setShowModal(false);
     } else {
       alert("Senha errada! Use 753951");
@@ -57,7 +68,7 @@ export default function Home() {
 
       {!user ? (
         <button onClick={loginGoogle} className="bg-white text-black px-10 py-5 rounded-2xl text-xl font-medium hover:bg-zinc-100 transition-all">
-          Entrar com Google (login só uma vez)
+          Entrar com Google
         </button>
       ) : (
         <>
@@ -73,7 +84,7 @@ export default function Home() {
         <div className="fixed inset-0 bg-black/90 flex items-center justify-center z-50">
           <div className="bg-zinc-900 p-10 rounded-3xl w-full max-w-md">
             <h2 className="text-3xl mb-6">Autorização necessária</h2>
-            <p className="mb-4 text-zinc-400">Digite a senha para criar chamadas:</p>
+            <p className="mb-4 text-zinc-400">Digite a senha:</p>
             <input type="password" value={senha} onChange={(e) => setSenha(e.target.value)} className="w-full bg-zinc-800 p-5 rounded-2xl text-lg mb-6" placeholder="753951" />
             <button onClick={autorizar} className="w-full bg-green-600 py-5 rounded-2xl text-xl hover:bg-green-700">Confirmar</button>
           </div>
