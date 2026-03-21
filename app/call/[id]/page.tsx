@@ -5,93 +5,80 @@ import { auth, db, realtimeDB } from "@/lib/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { doc, onSnapshot } from "firebase/firestore";
 import { ref, onValue, set } from "firebase/database";
-import { Mic, MicOff, Video, VideoOff, Monitor, Copy, LogOut } from "lucide-react";
+import { Mic, MicOff, Video, VideoOff, Monitor, MessageCircle, Copy, LogOut } from "lucide-react";
 
 export default function CallRoom() {
   const { id } = useParams();
   const [user, setUser] = useState<any>(null);
-  const [streams, setStreams] = useState<Map<string, MediaStream>>(new Map());
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [newMessage, setNewMessage] = useState("");
+
   const localVideo = useRef<HTMLVideoElement>(null);
+  const remoteVideo = useRef<HTMLVideoElement>(null);
   const localStream = useRef<MediaStream | null>(null);
-  const peers = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const peerConnection = useRef<RTCPeerConnection | null>(null);
   const router = useRouter();
 
-  // Login + stream local
   useEffect(() => {
-    onAuthStateChanged(auth, (u) => {
-      if (!u) router.push("/");
-      setUser(u);
-    });
+    onAuthStateChanged(auth, (u) => { if (!u) router.push("/"); setUser(u); });
 
-    navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: true }).then(stream => {
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
       localStream.current = stream;
       if (localVideo.current) localVideo.current.srcObject = stream;
     });
   }, [router]);
 
-  // Mesh WebRTC (multi-user real)
+  // WebRTC + renegociação pra tela
   useEffect(() => {
     if (!user) return;
 
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }, { urls: "turn:turn.cloudflare.com:3478", username: "user", credential: "pass" }] });
-    peers.current.set(user.uid, pc);
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    peerConnection.current = pc;
 
-    localStream.current?.getTracks().forEach(track => pc.addTrack(track, localStream.current!));
+    localStream.current?.getTracks().forEach(track => pc.addTrack(track));
 
     pc.ontrack = (e) => {
-      setStreams(prev => new Map(prev).set(e.streams[0].id, e.streams[0]));
+      if (remoteVideo.current) remoteVideo.current.srcObject = e.streams[0];
     };
 
-    pc.onicecandidate = (e) => {
-      if (e.candidate) set(ref(realtimeDB, `rooms/${id}/signaling/${user.uid}/ice`), e.candidate);
-    };
-
-    // Signaling mesh
     const signalingRef = ref(realtimeDB, `rooms/${id}/signaling`);
     onValue(signalingRef, (snap) => {
       const data = snap.val();
       if (!data) return;
-
-      Object.keys(data).forEach(peerId => {
-        if (peerId === user.uid) return;
-        const peerData = data[peerId];
-        if (peerData.offer && !pc.remoteDescription) {
-          pc.setRemoteDescription(new RTCSessionDescription(peerData.offer)).then(() => pc.createAnswer().then(answer => {
-            pc.setLocalDescription(answer);
-            set(ref(realtimeDB, `rooms/${id}/signaling/${user.uid}/answer`), answer);
-          }));
-        }
-        if (peerData.answer) pc.setRemoteDescription(new RTCSessionDescription(peerData.answer));
-        if (peerData.ice) pc.addIceCandidate(new RTCIceCandidate(peerData.ice));
-      });
+      if (data.offer) pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+      if (data.answer) pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+      if (data.ice) pc.addIceCandidate(new RTCIceCandidate(data.ice));
     });
 
-    // Cria offer inicial
-    setTimeout(() => pc.createOffer().then(offer => {
-      pc.setLocalDescription(offer);
-      set(ref(realtimeDB, `rooms/${id}/signaling/${user.uid}/offer`), offer);
-    }), 1200);
+    pc.onicecandidate = (e) => {
+      if (e.candidate) set(ref(realtimeDB, `rooms/${id}/signaling/ice`), e.candidate);
+    };
 
-    return () => peers.current.forEach(p => p.close());
+    setTimeout(() => {
+      pc.createOffer().then(offer => {
+        pc.setLocalDescription(offer);
+        set(ref(realtimeDB, `rooms/${id}/signaling/offer`), offer);
+      });
+    }, 800);
+
   }, [id, user]);
 
   const shareScreen = async () => {
     const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
     const screenTrack = screenStream.getVideoTracks()[0];
 
-    peers.current.forEach(pc => {
-      const sender = pc.getSenders().find(s => s.track?.kind === "video");
-      if (sender) sender.replaceTrack(screenTrack);
-    });
+    const sender = peerConnection.current?.getSenders().find(s => s.track?.kind === "video");
+    if (sender) sender.replaceTrack(screenTrack);
 
-    // Renegociação automática pra todo mundo ver a tela
-    peers.current.forEach(pc => pc.createOffer().then(offer => {
-      pc.setLocalDescription(offer);
-      set(ref(realtimeDB, `rooms/${id}/signaling/${user.uid}/offer`), offer);
-    }));
+    // Renegociação automática (isso faz a tela aparecer pro outro)
+    peerConnection.current?.createOffer().then(offer => {
+      peerConnection.current?.setLocalDescription(offer);
+      set(ref(realtimeDB, `rooms/${id}/signaling/offer`), offer);
+    });
   };
 
   const toggleMic = () => {
@@ -106,50 +93,57 @@ export default function CallRoom() {
     setCamOn(!camOn);
   };
 
+  const sendMessage = async () => {
+    if (!newMessage.trim()) return;
+    // (chat via Firestore - adicione collection se quiser persistente)
+    setMessages([...messages, { text: newMessage, user: user.email }]);
+    setNewMessage("");
+  };
+
   const copyLink = () => {
     navigator.clipboard.writeText(window.location.href);
-    alert("✅ Link/código copiado! Compartilhe com quem quiser entrar.");
+    alert("✅ Link copiado! Compartilhe com quem quiser entrar.");
   };
 
   return (
     <div className="h-screen bg-gradient-to-br from-zinc-950 to-black flex flex-col">
-      <header className="p-5 bg-zinc-900/90 backdrop-blur flex justify-between items-center border-b border-blue-500/30">
+      <header className="p-5 bg-zinc-900/90 flex justify-between">
         <h1 className="text-4xl font-black text-blue-400">2.0 CALL • {id}</h1>
-        <button onClick={copyLink} className="bg-zinc-800 hover:bg-blue-600 px-8 py-3 rounded-3xl flex items-center gap-3"><Copy size={24} /> Copiar link/código</button>
+        <button onClick={copyLink} className="bg-zinc-800 px-6 py-3 rounded-2xl flex gap-2"><Copy size={24} /> Copiar</button>
       </header>
 
-      <div className="flex-1 p-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 overflow-auto">
-        {/* Seu vídeo */}
-        <div className="relative rounded-3xl overflow-hidden bg-black border-2 border-blue-500 shadow-2xl">
-          {camOn ? (
-            <video ref={localVideo} autoPlay muted className="w-full h-full object-cover" />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center bg-zinc-950">
-              <img src={user?.photoURL || "https://i.imgur.com/0fXz9zD.png"} className="w-52 h-52 rounded-full border-4 border-blue-500" />
-            </div>
-          )}
-          <div className="absolute bottom-6 left-6 bg-black/70 px-6 py-3 rounded-2xl flex items-center gap-3 text-lg">
-            Você
-            {!micOn && <MicOff className="text-red-500" />}
-            {isSpeaking && <div className="w-5 h-5 bg-green-400 rounded-full animate-ping" />}
+      <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-8 p-8">
+        <div className="relative rounded-3xl overflow-hidden bg-black border border-blue-500">
+          {camOn ? <video ref={localVideo} autoPlay muted className="w-full h-full object-cover" /> : <div className="flex items-center justify-center h-full"><img src={user?.photoURL} className="w-52 h-52 rounded-full border-4 border-blue-500" /></div>}
+          <div className="absolute bottom-6 left-6 bg-black/70 px-6 py-3 rounded-2xl flex gap-3">
+            Você {!micOn && <MicOff className="text-red-500" />} {isSpeaking && <div className="w-5 h-5 bg-green-400 rounded-full animate-ping" />}
           </div>
         </div>
 
-        {/* Vídeos dos outros (multi-user) */}
-        {Array.from(streams.values()).map((stream, i) => (
-          <div key={i} className="relative rounded-3xl overflow-hidden bg-black border-2 border-zinc-700 shadow-2xl">
-            <video autoPlay playsInline srcObject={stream} className="w-full h-full object-cover" />
-          </div>
-        ))}
+        <div className="relative rounded-3xl overflow-hidden bg-black border border-zinc-700">
+          <video ref={remoteVideo} autoPlay className="w-full h-full object-cover" />
+        </div>
       </div>
 
-      {/* Controles futuristas */}
-      <div className="bg-zinc-900/95 backdrop-blur-2xl p-6 flex justify-center gap-8">
-        <button onClick={toggleMic} className="p-6 bg-zinc-800 hover:bg-zinc-700 rounded-3xl transition">{micOn ? <Mic size={40} /> : <MicOff size={40} className="text-red-500" />}</button>
-        <button onClick={toggleCam} className="p-6 bg-zinc-800 hover:bg-zinc-700 rounded-3xl transition">{camOn ? <Video size={40} /> : <VideoOff size={40} className="text-red-500" />}</button>
-        <button onClick={shareScreen} className="p-6 bg-blue-600 hover:bg-blue-500 rounded-3xl transition text-white"><Monitor size={40} /></button>
-        <button onClick={() => router.push("/")} className="p-6 bg-red-600/80 hover:bg-red-600 rounded-3xl"><LogOut size={40} /></button>
+      {/* Controles + Chat */}
+      <div className="bg-zinc-900/95 p-6 flex justify-center gap-8">
+        <button onClick={toggleMic} className="p-6 bg-zinc-800 rounded-3xl">{micOn ? <Mic size={36} /> : <MicOff size={36} className="text-red-500" />}</button>
+        <button onClick={toggleCam} className="p-6 bg-zinc-800 rounded-3xl">{camOn ? <Video size={36} /> : <VideoOff size={36} className="text-red-500" />}</button>
+        <button onClick={shareScreen} className="p-6 bg-blue-600 rounded-3xl"><Monitor size={36} /></button>
+        <button onClick={() => setShowChat(!showChat)} className="p-6 bg-zinc-800 rounded-3xl"><MessageCircle size={36} /></button>
       </div>
+
+      {showChat && (
+        <div className="absolute right-0 top-16 bottom-0 w-96 bg-zinc-900/95 border-l border-blue-500 p-6 flex flex-col">
+          <div className="flex-1 overflow-y-auto mb-4 space-y-3">
+            {messages.map((m, i) => <div key={i} className="bg-zinc-800 p-4 rounded-2xl"><span className="text-blue-400">{m.user}</span>: {m.text}</div>)}
+          </div>
+          <div className="flex gap-3">
+            <input value={newMessage} onChange={e => setNewMessage(e.target.value)} onKeyDown={e => e.key === "Enter" && sendMessage()} className="flex-1 bg-zinc-800 p-5 rounded-3xl" placeholder="Digite uma mensagem..." />
+            <button onClick={sendMessage} className="bg-blue-600 px-8 rounded-3xl">Enviar</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
